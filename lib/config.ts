@@ -2,7 +2,7 @@
 
 export const CFG = {
   // Particle count (default — user can adjust via slider)
-  numParticles: 1000,
+  numParticles: 1500,
 
   // SPH physics
   smoothingH: 26,
@@ -22,20 +22,14 @@ export const CFG = {
   gravityWellStr: 1400,
   handRadius: 90,
 
-  // Rendering — multi-layer particle drawing
-  particleRadius: 2.5,   // core circle
-  glowRadius: 7,         // medium glow
-  bloomRadius: 14,        // wide bloom
-  coreAlpha: 0.85,
-  glowAlpha: 0.08,
-  bloomAlpha: 0.03,
+  // WebGL rendering
+  pointSize: 8.0,       // base gl_PointSize for particles
+  trailFade: 0.06,      // trail persistence (lower = longer trails)
 
-  // Post-processing (canvas filter blur)
-  postGlowSigma: 6,
-  postBloomSigma: 18,
-  postGlowAlpha: 0.5,
-  postBloomAlpha: 0.2,
-  trailFade: 0.06, // alpha of bg fill per frame (lower = longer trails)
+  // Post-processing (UnrealBloom)
+  bloomStrength: 0.6,
+  bloomRadius: 0.4,
+  bloomThreshold: 0.2,
 
   // Shape formation
   formationRadius: 200,

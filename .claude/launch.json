@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Next.js Dev Server",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "Python Desktop (mouse demo)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py", "--no-webcam"],
+      "port": 0
+    },
+    {
+      "name": "Python Desktop (webcam)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py"],
+      "port": 0
+    },
+    {
+      "name": "Python Desktop (GPU)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py", "--gpu"],
+      "port": 0
+    }
+  ]
+}
