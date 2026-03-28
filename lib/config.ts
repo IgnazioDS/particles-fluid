@@ -39,8 +39,8 @@ export const CFG = {
 
   // Shape formation
   formationRadius: 200,
-  formationNPoints: 280,
-  formationHoldS: 3.0,
+  formationNPoints: 380,
+  formationHoldS: 3.2,
   formationSpringK: 280,
   formationMaxForce: 600,
 } as const;

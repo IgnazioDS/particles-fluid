@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { SPHSolver, type ForceSource } from "@/lib/sph";
-import { Renderer, type FormationOverlay } from "@/lib/renderer";
+import { Renderer } from "@/lib/renderer";
 import { FormationManager, SHAPE_NAMES, type ShapeName } from "@/lib/shapes";
 import { THEMES } from "@/lib/themes";
 import { AudioReactor } from "@/lib/audio";
@@ -50,6 +50,8 @@ export default function Page() {
   const [gravityPct, setGravityPct] = useState(50); // 0-100 slider
   const [audioOn, setAudioOn] = useState(false);
   const [activeShape, setActiveShape] = useState<string | null>(null);
+  const [autoCycle, setAutoCycle] = useState(false);
+  const [presentationMode, setPresentationMode] = useState(false);
 
   // Refs for animation loop (avoid stale closures)
   const paramsRef = useRef({
@@ -167,6 +169,11 @@ export default function Page() {
         renderer.reset(THEMES[paramsRef.current.themeIdx].bg);
       } else if (key === "h") {
         setShowPanel((p) => !p);
+      } else if (key === "p") {
+        setPresentationMode((p) => !p);
+      } else if (key === "a") {
+        const on = formation.toggleAutoCycle();
+        setAutoCycle(on);
       } else if (key in KEY_SHAPES) {
         const { name, opts } = KEY_SHAPES[key];
         formation.forceShape(name, opts);
@@ -231,9 +238,8 @@ export default function Page() {
         }
       }
 
-      // Formation forces
-      const extra = formation.update(solver.px, solver.py, solver.n, dt);
-      solver.sources = [...sources, ...extra];
+      // Formation: set cached forces BEFORE physics (centre attractor for free particles)
+      solver.sources = [...sources, ...formation.cachedForces];
 
       // Audio modulation
       const ar = audioRef.current;
@@ -256,19 +262,14 @@ export default function Page() {
       // Physics
       solver.step(CFG.substeps);
 
+      // Formation: apply position overrides AFTER physics (direct blending)
+      formation.update(
+        solver.px, solver.py, solver.vx, solver.vy, solver.temp,
+        solver.n, dt,
+      );
+
       // Render
-      const ov = formation.getOverlay();
-      let fOverlay: FormationOverlay | null = null;
-      if (ov) {
-        fOverlay = {
-          shapeName: ov.shapeName,
-          formulaTex: ov.formulaTex,
-          formulaPos: ov.formulaPos,
-          alpha: ov.alpha,
-          latticePts: ov.latticePts,
-          nPts: ov.nPts,
-        };
-      }
+      const fOverlay = formation.getOverlay();
 
       renderer.render(
         solver.px, solver.py, solver.temp, solver.n,
@@ -319,12 +320,14 @@ export default function Page() {
       />
 
       {/* FPS */}
-      <div className="fps">
-        {fps} FPS &middot; {particles}p
-      </div>
+      {!presentationMode && (
+        <div className="fps">
+          {fps} FPS &middot; {particles}p
+        </div>
+      )}
 
       {/* Control panel */}
-      {showPanel && (
+      {showPanel && !presentationMode && (
         <div className="panel">
           <h2>Particles Fluid</h2>
           <div className="subtitle">
@@ -407,11 +410,31 @@ export default function Page() {
 
           {/* Actions */}
           <div className="action-row">
+            <button
+              className={`action-btn ${autoCycle ? "on" : ""}`}
+              onClick={() => {
+                const fm = formationRef.current;
+                if (fm) {
+                  const on = fm.toggleAutoCycle();
+                  setAutoCycle(on);
+                }
+              }}
+            >
+              {autoCycle ? "\u25B6 Cycling" : "\u25B6 Auto"}
+            </button>
             <button className={`action-btn ${audioOn ? "on" : ""}`} onClick={toggleAudio}>
-              {audioOn ? "\uD83C\uDFA4 Mic ON" : "\uD83C\uDFA4 Audio"}
+              {audioOn ? "\uD83C\uDFA4 ON" : "\uD83C\uDFA4 Mic"}
             </button>
             <button className="action-btn" onClick={screenshot}>
               \uD83D\uDCF7 Snap
+            </button>
+          </div>
+          <div className="action-row" style={{ marginTop: 4 }}>
+            <button
+              className={`action-btn ${presentationMode ? "on" : ""}`}
+              onClick={() => setPresentationMode((p) => !p)}
+            >
+              \uD83C\uDFAC Present
             </button>
             <button
               className="action-btn"
@@ -428,7 +451,8 @@ export default function Page() {
 
           <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)" }}>
             <kbd>1</kbd>-<kbd>9</kbd> shapes &middot; <kbd>R</kbd> reset
-            &middot; <kbd>H</kbd> hide &middot; Right-click repels
+            &middot; <kbd>H</kbd> hide &middot; <kbd>P</kbd> present
+            &middot; <kbd>A</kbd> auto-cycle
           </div>
         </div>
       )}
@@ -441,10 +465,12 @@ export default function Page() {
       )}
 
       {/* Bottom hint */}
-      <div className="hint-bar">
-        Click to interact &middot; <b>H</b> toggle panel &middot; <b>1-9</b>{" "}
-        shapes &middot; Right-click repels
-      </div>
+      {!presentationMode && (
+        <div className="hint-bar">
+          Click to interact &middot; <b>H</b> panel &middot; <b>P</b> present
+          &middot; <b>A</b> auto-cycle &middot; <b>1-9</b> shapes
+        </div>
+      )}
     </div>
   );
 }

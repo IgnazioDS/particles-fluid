@@ -27,6 +27,10 @@ export interface FormationOverlay {
   alpha: number;
   latticePts: Float32Array;
   nPts: number;
+  outlinePts: Float32Array;
+  outlineN: number;
+  formState: "forming" | "holding" | "dissolving";
+  stateProgress: number;
 }
 
 export class Renderer {
@@ -263,44 +267,96 @@ export class Renderer {
   ): void {
     const alpha = ov.alpha;
 
-    // Ghost lattice dots
-    if (ov.nPts > 0) {
+    // ── Shape outline (neon glow style) ────────────────────────────────────
+    if (ov.outlineN > 1) {
+      // Outline appears slightly ahead of particles (anticipation)
+      const outlineAlpha = ov.formState === "forming"
+        ? Math.min(ov.stateProgress / 0.3, 1) * alpha
+        : alpha;
+
       ctx.save();
-      ctx.globalAlpha = 0.2 * alpha;
-      ctx.fillStyle = "rgba(180, 180, 220, 1)";
+
+      // Glow pass (wide, dim, blurred)
+      ctx.globalAlpha = outlineAlpha * 0.25;
+      ctx.strokeStyle = theme.accent;
+      ctx.lineWidth = 5;
+      ctx.filter = "blur(4px)";
+      ctx.beginPath();
+      ctx.moveTo(ov.outlinePts[0], ov.outlinePts[1]);
+      for (let i = 1; i < ov.outlineN; i++) {
+        ctx.lineTo(ov.outlinePts[i * 2], ov.outlinePts[i * 2 + 1]);
+      }
+      ctx.stroke();
+      ctx.filter = "none";
+
+      // Crisp pass (thin, bright)
+      ctx.globalAlpha = outlineAlpha * 0.5;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(ov.outlinePts[0], ov.outlinePts[1]);
+      for (let i = 1; i < ov.outlineN; i++) {
+        ctx.lineTo(ov.outlinePts[i * 2], ov.outlinePts[i * 2 + 1]);
+      }
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // ── Ghost lattice dots (dimmer now that outline provides structure) ─────
+    if (ov.nPts > 0 && ov.formState === "forming") {
+      ctx.save();
+      ctx.globalAlpha = 0.08 * alpha;
+      ctx.fillStyle = "rgba(200, 200, 240, 1)";
       ctx.beginPath();
       for (let i = 0; i < ov.nPts; i++) {
         const x = ov.latticePts[i * 2];
         const y = ov.latticePts[i * 2 + 1];
-        ctx.moveTo(x + 2.5, y);
-        ctx.arc(x, y, 2.5, 0, TAU);
+        ctx.moveTo(x + 2, y);
+        ctx.arc(x, y, 2, 0, TAU);
       }
       ctx.fill();
       ctx.restore();
     }
 
-    // Formula text
+    // ── Formula text ───────────────────────────────────────────────────────
     if (ov.formulaTex) {
+      // Formula fades in during forming, full during holding, fades during dissolving
+      const formulaAlpha =
+        ov.formState === "forming"
+          ? Math.max(0, (ov.stateProgress - 0.5) / 0.5) * alpha
+          : alpha;
+      if (formulaAlpha < 0.01) { return; }
+
       ctx.save();
-      const fontSize = Math.max(14, Math.min(26, this.W * 0.017));
+      const fontSize = Math.max(16, Math.min(28, this.W * 0.019));
       ctx.font = `${fontSize}px "SF Mono", "Fira Code", "JetBrains Mono", monospace`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const [fx, fy] = ov.formulaPos;
 
-      ctx.globalAlpha = alpha * 0.7;
+      // Glow backdrop
+      ctx.globalAlpha = formulaAlpha * 0.2;
+      ctx.filter = "blur(6px)";
+      ctx.fillStyle = theme.accent;
+      ctx.fillText(ov.formulaTex, fx, fy);
+      ctx.filter = "none";
+
+      // Shadow
+      ctx.globalAlpha = formulaAlpha * 0.6;
       ctx.fillStyle = "rgba(0, 0, 0, 1)";
       ctx.fillText(ov.formulaTex, fx + 1, fy + 1);
 
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = "rgba(240, 240, 240, 1)";
+      // Main text
+      ctx.globalAlpha = formulaAlpha;
+      ctx.fillStyle = "rgba(245, 245, 245, 1)";
       ctx.fillText(ov.formulaTex, fx, fy);
 
-      // Shape name above
-      ctx.globalAlpha = alpha * 0.5;
-      ctx.font = `600 ${fontSize * 0.65}px "SF Mono", "Fira Code", monospace`;
+      // Shape label above
+      ctx.globalAlpha = formulaAlpha * 0.55;
+      ctx.font = `700 ${fontSize * 0.55}px "SF Mono", "Fira Code", monospace`;
       ctx.fillStyle = theme.accent;
-      ctx.fillText(ov.shapeName.toUpperCase(), fx, fy - fontSize * 1.5);
+      const label = ov.shapeName.toUpperCase();
+      ctx.fillText(label, fx, fy - fontSize * 1.6);
 
       ctx.restore();
     }
