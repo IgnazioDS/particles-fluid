@@ -4,11 +4,23 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { SPHSolver, type ForceSource } from "@/lib/sph";
 import { Renderer, type FormationOverlay } from "@/lib/renderer";
 import { FormationManager, SHAPE_NAMES, type ShapeName } from "@/lib/shapes";
+import { THEMES } from "@/lib/themes";
+import { AudioReactor } from "@/lib/audio";
 import { CFG } from "@/lib/config";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Debug shape key map (1-9)
+// Types & constants
 // ─────────────────────────────────────────────────────────────────────────────
+
+type Mode = "attract" | "repel" | "vortex" | "gravity";
+
+const MODES: { id: Mode; label: string; icon: string }[] = [
+  { id: "attract", label: "Attract", icon: "\u25C9" },
+  { id: "repel", label: "Repel", icon: "\u25CE" },
+  { id: "vortex", label: "Vortex", icon: "\u25CC" },
+  { id: "gravity", label: "Well", icon: "\u229B" },
+];
+
 const KEY_SHAPES: Record<string, { name: ShapeName; opts?: Record<string, number> }> = {
   "1": { name: "circle" },
   "2": { name: "ellipse", opts: { axisRatio: 1.5 } },
@@ -21,44 +33,82 @@ const KEY_SHAPES: Record<string, { name: ShapeName; opts?: Record<string, number
   "9": { name: "lissajous" },
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function Page() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // UI state
   const [fps, setFps] = useState(0);
   const [showPanel, setShowPanel] = useState(true);
-  const [gravityOn, setGravityOn] = useState(true);
-  const [formationOn, setFormationOn] = useState(true);
+  const [themeIdx, setThemeIdx] = useState(0);
+  const [mode, setMode] = useState<Mode>("attract");
+  const [particles, setParticles] = useState<number>(CFG.numParticles);
+  const [viscosity, setViscosity] = useState(55); // 0-100 slider
+  const [gravityPct, setGravityPct] = useState(50); // 0-100 slider
+  const [audioOn, setAudioOn] = useState(false);
   const [activeShape, setActiveShape] = useState<string | null>(null);
-  const [particleCount, setParticleCount] = useState(CFG.numParticles);
 
-  // Refs for mutable state inside animation loop
-  const mouseRef = useRef({ x: -1, y: -1, left: false, right: false });
-  const stateRef = useRef({
-    gravityOn: true,
-    formationOn: true,
+  // Refs for animation loop (avoid stale closures)
+  const paramsRef = useRef({
+    themeIdx: 0,
+    mode: "attract" as Mode,
+    viscosity: 0.55,
+    gravity: 200,
   });
+  const mouseRef = useRef({ x: -1, y: -1, left: false, right: false });
+  const audioRef = useRef<AudioReactor | null>(null);
+  const formationRef = useRef<FormationManager | null>(null);
 
-  // Keep stateRef in sync
-  useEffect(() => { stateRef.current.gravityOn = gravityOn; }, [gravityOn]);
-  useEffect(() => { stateRef.current.formationOn = formationOn; }, [formationOn]);
+  // Sync state → refs
+  useEffect(() => { paramsRef.current.themeIdx = themeIdx; }, [themeIdx]);
+  useEffect(() => { paramsRef.current.mode = mode; }, [mode]);
+  useEffect(() => { paramsRef.current.viscosity = viscosity / 100; }, [viscosity]);
+  useEffect(() => { paramsRef.current.gravity = (gravityPct / 50) * 200; }, [gravityPct]);
 
+  // Audio toggle
+  const toggleAudio = useCallback(async () => {
+    if (!audioRef.current) audioRef.current = new AudioReactor();
+    const ar = audioRef.current;
+    if (ar.active) {
+      ar.stop();
+      setAudioOn(false);
+    } else {
+      const ok = await ar.start();
+      setAudioOn(ok);
+    }
+  }, []);
+
+  // Screenshot
+  const screenshot = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const link = document.createElement("a");
+    link.download = `particles-fluid-${Date.now()}.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  }, []);
+
+  // ── Main simulation effect ─────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Size to viewport
     let W = window.innerWidth;
     let H = window.innerHeight;
 
-    const solver = new SPHSolver(particleCount, W, H);
+    const solver = new SPHSolver(particles, W, H);
     solver.initialize();
     const renderer = new Renderer(canvas, W, H);
     const formation = new FormationManager(W, H);
+    formationRef.current = formation;
 
-    // FPS tracking
-    let frameCount = 0;
-    let fpsT0 = performance.now();
     let running = true;
     let lastTime = performance.now();
+    let frameCount = 0;
+    let fpsT0 = performance.now();
 
     // ── Mouse handlers ───────────────────────────────────────────────────
     const onMouseMove = (e: MouseEvent) => {
@@ -75,28 +125,35 @@ export default function Page() {
       if (e.button === 2) mouseRef.current.right = false;
     };
     const onContext = (e: Event) => e.preventDefault();
-
-    // Touch support
-    const onTouchMove = (e: TouchEvent) => {
-      e.preventDefault();
-      const touch = e.touches[0];
-      const rect = canvas.getBoundingClientRect();
-      mouseRef.current.x = (touch.clientX - rect.left) * (W / rect.width);
-      mouseRef.current.y = (touch.clientY - rect.top) * (H / rect.height);
-      mouseRef.current.left = true;
+    const onMouseLeave = () => {
+      mouseRef.current.x = -1;
+      mouseRef.current.y = -1;
+      mouseRef.current.left = false;
+      mouseRef.current.right = false;
     };
+
+    // Touch
     const onTouchStart = (e: TouchEvent) => {
       e.preventDefault();
+      const t = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      mouseRef.current.x = (t.clientX - rect.left) * (W / rect.width);
+      mouseRef.current.y = (t.clientY - rect.top) * (H / rect.height);
       mouseRef.current.left = true;
-      onTouchMove(e);
     };
-    const onTouchEnd = () => {
-      mouseRef.current.left = false;
+    const onTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      const t = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      mouseRef.current.x = (t.clientX - rect.left) * (W / rect.width);
+      mouseRef.current.y = (t.clientY - rect.top) * (H / rect.height);
     };
+    const onTouchEnd = () => { mouseRef.current.left = false; };
 
     canvas.addEventListener("mousemove", onMouseMove);
     canvas.addEventListener("mousedown", onMouseDown);
     canvas.addEventListener("mouseup", onMouseUp);
+    canvas.addEventListener("mouseleave", onMouseLeave);
     canvas.addEventListener("contextmenu", onContext);
     canvas.addEventListener("touchstart", onTouchStart, { passive: false });
     canvas.addEventListener("touchmove", onTouchMove, { passive: false });
@@ -105,28 +162,9 @@ export default function Page() {
     // ── Keyboard ─────────────────────────────────────────────────────────
     const onKey = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
-
       if (key === "r") {
         solver.initialize();
-        renderer.reset();
-      } else if (key === "g") {
-        setGravityOn((prev) => {
-          const next = !prev;
-          if (!next) {
-            solver.gravX = 0;
-            solver.gravY = 0;
-          } else {
-            solver.gravX = 0;
-            solver.gravY = 200;
-          }
-          return next;
-        });
-      } else if (key === "f") {
-        setFormationOn((prev) => {
-          const next = !prev;
-          formation.toggle();
-          return next;
-        });
+        renderer.reset(THEMES[paramsRef.current.themeIdx].bg);
       } else if (key === "h") {
         setShowPanel((p) => !p);
       } else if (key in KEY_SHAPES) {
@@ -153,44 +191,91 @@ export default function Page() {
       const dt = Math.min((now - lastTime) / 1000, 0.05);
       lastTime = now;
 
-      // Build force sources from mouse
+      const params = paramsRef.current;
+      const theme = THEMES[params.themeIdx];
       const m = mouseRef.current;
+
+      // Update solver params from sliders
+      solver.mu = params.viscosity;
+      solver.gravY = params.gravity;
+
+      // Build force sources from interaction mode
       const sources: ForceSource[] = [];
       if (m.x >= 0 && m.y >= 0) {
         if (m.right) {
+          // Right-click always repels
           sources.push({ x: m.x, y: m.y, strength: CFG.repelStr, radius: CFG.handRadius * 1.35 });
         } else if (m.left) {
-          sources.push({ x: m.x, y: m.y, strength: CFG.attractStr, radius: CFG.handRadius });
+          switch (params.mode) {
+            case "attract":
+              sources.push({ x: m.x, y: m.y, strength: CFG.attractStr, radius: CFG.handRadius });
+              break;
+            case "repel":
+              sources.push({ x: m.x, y: m.y, strength: CFG.repelStr, radius: CFG.handRadius * 1.35 });
+              break;
+            case "vortex":
+              sources.push({
+                x: m.x, y: m.y,
+                strength: CFG.attractStr * 0.25,
+                radius: CFG.handRadius * 1.2,
+                vortex: CFG.vortexStr,
+              });
+              break;
+            case "gravity":
+              sources.push({ x: m.x, y: m.y, strength: CFG.gravityWellStr, radius: CFG.handRadius * 2.2 });
+              break;
+          }
         } else {
-          sources.push({ x: m.x, y: m.y, strength: CFG.attractStr * 0.15, radius: CFG.handRadius * 0.6 });
+          // Hover — gentle attract
+          sources.push({ x: m.x, y: m.y, strength: CFG.attractStr * 0.12, radius: CFG.handRadius * 0.5 });
         }
       }
 
       // Formation forces
-      const extraSources = formation.update(solver.px, solver.py, solver.n, dt);
-      solver.sources = [...sources, ...extraSources];
+      const extra = formation.update(solver.px, solver.py, solver.n, dt);
+      solver.sources = [...sources, ...extra];
+
+      // Audio modulation
+      const ar = audioRef.current;
+      let audioEnergy = 0;
+      if (ar && ar.active) {
+        const e = ar.getEnergy();
+        audioEnergy = e.overall;
+        // Bass → pulse force at centre
+        if (e.bass > 0.25) {
+          solver.sources.push({
+            x: W / 2, y: H / 2,
+            strength: e.bass * 500 * (Math.random() > 0.5 ? 1 : -1),
+            radius: 250,
+          });
+        }
+        // Mid → gravity wobble
+        solver.gravX = Math.sin(now * 0.002) * e.mid * 80;
+      }
 
       // Physics
       solver.step(CFG.substeps);
 
       // Render
-      const overlay = formation.getOverlay();
+      const ov = formation.getOverlay();
       let fOverlay: FormationOverlay | null = null;
-      if (overlay) {
+      if (ov) {
         fOverlay = {
-          shapeName: overlay.shapeName,
-          formulaTex: overlay.formulaTex,
-          formulaPos: overlay.formulaPos,
-          alpha: overlay.alpha,
-          latticePts: overlay.latticePts,
-          nPts: overlay.nPts,
+          shapeName: ov.shapeName,
+          formulaTex: ov.formulaTex,
+          formulaPos: ov.formulaPos,
+          alpha: ov.alpha,
+          latticePts: ov.latticePts,
+          nPts: ov.nPts,
         };
       }
 
       renderer.render(
         solver.px, solver.py, solver.temp, solver.n,
+        theme,
         fOverlay,
-        m.x, m.y, m.left, m.right,
+        { x: m.x, y: m.y, active: m.left || m.right, mode: m.right ? "repel" : params.mode },
+        audioEnergy,
       );
 
       // FPS
@@ -210,6 +295,7 @@ export default function Page() {
       canvas.removeEventListener("mousemove", onMouseMove);
       canvas.removeEventListener("mousedown", onMouseDown);
       canvas.removeEventListener("mouseup", onMouseUp);
+      canvas.removeEventListener("mouseleave", onMouseLeave);
       canvas.removeEventListener("contextmenu", onContext);
       canvas.removeEventListener("touchstart", onTouchStart);
       canvas.removeEventListener("touchmove", onTouchMove);
@@ -217,10 +303,15 @@ export default function Page() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", onResize);
     };
-  }, [particleCount]);
+  }, [particles]);
+
+  const theme = THEMES[themeIdx];
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden" style={{ background: CFG.bgColor }}>
+    <div
+      className="relative w-screen h-screen overflow-hidden"
+      style={{ background: theme.bg, ["--accent" as string]: theme.accent }}
+    >
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full"
@@ -228,66 +319,131 @@ export default function Page() {
       />
 
       {/* FPS */}
-      <div className="fps">FPS {fps}</div>
+      <div className="fps">
+        {fps} FPS &middot; {particles}p
+      </div>
 
       {/* Control panel */}
       {showPanel && (
         <div className="panel">
           <h2>Particles Fluid</h2>
-          <div className="muted" style={{ marginBottom: 4 }}>
-            {particleCount} particles &middot; SPH simulation
+          <div className="subtitle">
+            Interactive SPH simulation &middot; {particles} particles
           </div>
+
           <div className="sep" />
-          <div><kbd>Click</kbd> attract &nbsp; <kbd>Right-click</kbd> repel</div>
-          <div><kbd>1</kbd>-<kbd>9</kbd> trigger shapes</div>
-          <div className="sep" />
-          <div>
-            <kbd>R</kbd> reset &nbsp;
-            <kbd>G</kbd> gravity{" "}
-            <span className={gravityOn ? "accent" : "muted"}>
-              {gravityOn ? "ON" : "OFF"}
-            </span>
+
+          {/* Interaction mode */}
+          <div className="section-label">Interaction</div>
+          <div className="mode-grid">
+            {MODES.map((m) => (
+              <button
+                key={m.id}
+                className={`mode-btn ${mode === m.id ? "active" : ""}`}
+                onClick={() => setMode(m.id)}
+              >
+                <span className="mode-icon">{m.icon}</span>
+                {m.label}
+              </button>
+            ))}
           </div>
-          <div>
-            <kbd>F</kbd> formation{" "}
-            <span className={formationOn ? "accent" : "muted"}>
-              {formationOn ? "ON" : "OFF"}
-            </span>
-            &nbsp; <kbd>H</kbd> hide panel
-          </div>
+
           <div className="sep" />
-          <div className="muted" style={{ fontSize: 10 }}>
-            Shapes: circle, ellipse, triangle, square,
-            pentagon, hexagon, rose, spiral, lissajous
+
+          {/* Theme picker */}
+          <div className="section-label">Theme</div>
+          <div className="theme-row">
+            {THEMES.map((t, i) => (
+              <div
+                key={t.name}
+                className={`theme-dot ${themeIdx === i ? "active" : ""}`}
+                style={{ background: t.lut[180] }}
+                title={t.name}
+                onClick={() => setThemeIdx(i)}
+              />
+            ))}
+          </div>
+
+          <div className="sep" />
+
+          {/* Sliders */}
+          <div className="section-label">Physics</div>
+          <div className="slider-row">
+            <span className="slider-label">Particles</span>
+            <input
+              type="range"
+              min={200}
+              max={2000}
+              step={100}
+              value={particles}
+              onChange={(e) => setParticles(Number(e.target.value))}
+            />
+            <span className="slider-val">{particles}</span>
+          </div>
+          <div className="slider-row">
+            <span className="slider-label">Viscosity</span>
+            <input
+              type="range"
+              min={5}
+              max={100}
+              value={viscosity}
+              onChange={(e) => setViscosity(Number(e.target.value))}
+            />
+            <span className="slider-val">{(viscosity / 100).toFixed(2)}</span>
+          </div>
+          <div className="slider-row">
+            <span className="slider-label">Gravity</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={gravityPct}
+              onChange={(e) => setGravityPct(Number(e.target.value))}
+            />
+            <span className="slider-val">{Math.round((gravityPct / 50) * 200)}</span>
+          </div>
+
+          <div className="sep" />
+
+          {/* Actions */}
+          <div className="action-row">
+            <button className={`action-btn ${audioOn ? "on" : ""}`} onClick={toggleAudio}>
+              {audioOn ? "\uD83C\uDFA4 Mic ON" : "\uD83C\uDFA4 Audio"}
+            </button>
+            <button className="action-btn" onClick={screenshot}>
+              \uD83D\uDCF7 Snap
+            </button>
+            <button
+              className="action-btn"
+              onClick={() => {
+                const canvas = canvasRef.current;
+                if (canvas) canvas.requestFullscreen?.();
+              }}
+            >
+              \u26F6 Full
+            </button>
+          </div>
+
+          <div className="sep" />
+
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)" }}>
+            <kbd>1</kbd>-<kbd>9</kbd> shapes &middot; <kbd>R</kbd> reset
+            &middot; <kbd>H</kbd> hide &middot; Right-click repels
           </div>
         </div>
       )}
 
       {/* Active shape toast */}
       {activeShape && (
-        <div
-          style={{
-            position: "absolute",
-            top: 16,
-            left: "50%",
-            transform: "translateX(-50%)",
-            padding: "6px 18px",
-            background: "rgba(255, 136, 68, 0.15)",
-            border: "1px solid rgba(255, 136, 68, 0.3)",
-            borderRadius: 8,
-            fontSize: 13,
-            color: "#ff8844",
-            zIndex: 20,
-            pointerEvents: "none",
-          }}
-        >
+        <div className="toast">
           Forming: <strong>{activeShape}</strong>
         </div>
       )}
 
       {/* Bottom hint */}
       <div className="hint-bar">
-        Touch / click to interact &middot; Press <b>H</b> to toggle panel &middot; Keys <b>1-9</b> for shapes
+        Click to interact &middot; <b>H</b> toggle panel &middot; <b>1-9</b>{" "}
+        shapes &middot; Right-click repels
       </div>
     </div>
   );

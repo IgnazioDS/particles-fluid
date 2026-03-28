@@ -1,10 +1,8 @@
 /**
- * 2-D SPH fluid solver (TypeScript port).
+ * 2-D SPH fluid solver (TypeScript).
  *
- * Uses spatial hashing (grid) for O(n * avg_neighbours) neighbour lookup
- * instead of the O(n^2) brute force in the Python/Taichi version.
- *
- * Kernel functions: Poly6 (density), Spiky gradient (pressure), Viscosity Laplacian.
+ * Spatial hashing for O(n * avg_neighbours) neighbour lookup.
+ * Supports vortex forces (perpendicular to radial direction).
  */
 
 const PI = Math.PI;
@@ -14,6 +12,7 @@ export interface ForceSource {
   y: number;
   strength: number;
   radius: number;
+  vortex?: number; // perpendicular force component (spin)
 }
 
 export class SPHSolver {
@@ -45,7 +44,7 @@ export class SPHSolver {
   private h2: number;
   private rho0: number;
   private k: number;
-  private mu: number;
+  mu: number;
   private dt: number;
   private mass: number;
   private damp: number;
@@ -53,26 +52,11 @@ export class SPHSolver {
   private cSpiky: number;
   private cVisc: number;
 
-  // Gravity
   gravX = 0;
   gravY: number;
-
-  // External forces
   sources: ForceSource[] = [];
 
-  constructor(
-    n: number,
-    width: number,
-    height: number,
-    h = 26,
-    rho0 = 280,
-    k = 200,
-    mu = 0.55,
-    gravity = 200,
-    dt = 0.008,
-    mass = 1.0,
-    damp = 0.4,
-  ) {
+  constructor(n: number, width: number, height: number, h = 26, rho0 = 280, k = 200, mu = 0.55, gravity = 200, dt = 0.008, mass = 1.0, damp = 0.4) {
     this.n = n;
     this.W = width;
     this.H = height;
@@ -85,7 +69,6 @@ export class SPHSolver {
     this.mass = mass;
     this.damp = damp;
     this.gravY = gravity;
-
     this.cPoly6 = 4.0 / (PI * h ** 8);
     this.cSpiky = -30.0 / (PI * h ** 5);
     this.cVisc = 40.0 / (PI * h ** 5);
@@ -117,39 +100,33 @@ export class SPHSolver {
       this.temp[i] = Math.random() * 0.15;
     }
     this.gravX = 0;
-    this.gravY = this.rho0 > 0 ? 200 : 0; // default gravity
+    this.gravY = 200;
   }
 
-  /** Set gravity tilt angle (radians, 0 = straight down). */
   setGravityTilt(angle: number): void {
-    const g = 200;
+    const g = Math.sqrt(this.gravX ** 2 + this.gravY ** 2) || 200;
     this.gravX = Math.sin(angle) * g;
     this.gravY = Math.cos(angle) * g;
   }
 
-  // ── Spatial hash grid ────────────────────────────────────────────────────
+  // ── Spatial hash ─────────────────────────────────────────────────────────
 
   private buildGrid(): void {
     this.cellCount.fill(0);
-
     const cs = this.cellSize;
     const gw = this.gridW;
     const gh = this.gridH;
-
     for (let i = 0; i < this.n; i++) {
       const ci = Math.min(Math.max(0, (this.px[i] / cs) | 0), gw - 1);
       const cj = Math.min(Math.max(0, (this.py[i] / cs) | 0), gh - 1);
       this.cellCount[ci + cj * gw]++;
     }
-
     let sum = 0;
     for (let c = 0; c < this.nCells; c++) {
       this.cellStart[c] = sum;
       sum += this.cellCount[c];
     }
-
     this.writePos.set(this.cellStart);
-
     for (let i = 0; i < this.n; i++) {
       const ci = Math.min(Math.max(0, (this.px[i] / cs) | 0), gw - 1);
       const cj = Math.min(Math.max(0, (this.py[i] / cs) | 0), gh - 1);
@@ -161,7 +138,7 @@ export class SPHSolver {
   // ── SPH kernels ──────────────────────────────────────────────────────────
 
   private computeDensityPressure(): void {
-    const { n, h, h2, mass, rho0, k: kk, cPoly6 } = this;
+    const { n, h2, mass, rho0, k: kk, cPoly6 } = this;
     const cs = this.cellSize;
     const gw = this.gridW;
     const gh = this.gridH;
@@ -173,7 +150,6 @@ export class SPHSolver {
       const yi = py[i];
       const ci = Math.min(Math.max(0, (xi / cs) | 0), gw - 1);
       const cj = Math.min(Math.max(0, (yi / cs) | 0), gh - 1);
-
       for (let di = -1; di <= 1; di++) {
         const ni = ci + di;
         if (ni < 0 || ni >= gw) continue;
@@ -195,17 +171,13 @@ export class SPHSolver {
           }
         }
       }
-
       rho[i] = rho_i;
       pres[i] = Math.max(kk * (rho_i - rho0), 0);
     }
   }
 
   private computeForcesIntegrate(): void {
-    const {
-      n, h, h2, mass, mu, dt, damp, cSpiky, cVisc,
-      px, py, vx, vy, rho, pres, sources,
-    } = this;
+    const { n, h, h2, mass, mu, dt, damp, cSpiky, cVisc, px, py, vx, vy, rho, pres, sources } = this;
     const cs = this.cellSize;
     const gw = this.gridW;
     const gh = this.gridH;
@@ -216,12 +188,8 @@ export class SPHSolver {
     const gravY = this.gravY;
 
     for (let i = 0; i < n; i++) {
-      let fpx = 0, fpy = 0;
-      let fvx = 0, fvy = 0;
-      const xi = px[i];
-      const yi = py[i];
-      const vxi = vx[i];
-      const vyi = vy[i];
+      let fpx = 0, fpy = 0, fvx = 0, fvy = 0;
+      const xi = px[i], yi = py[i], vxi = vx[i], vyi = vy[i];
       const rho_i = Math.max(rho[i], 1e-3);
       const pres_i = pres[i];
       const ci = Math.min(Math.max(0, (xi / cs) | 0), gw - 1);
@@ -245,16 +213,11 @@ export class SPHSolver {
             if (r2 >= h2 || r2 < 1e-8) continue;
             const r = Math.sqrt(r2);
             const rho_j = Math.max(rho[j], 1e-3);
-
-            // Spiky gradient (pressure)
             const d = h - r;
-            const scale =
-              -mass * (pres_i + pres[j]) / (2 * rho_j) * cSpiky * d * d;
+            const scale = -mass * (pres_i + pres[j]) / (2 * rho_j) * cSpiky * d * d;
             const invR = 1 / r;
             fpx += scale * dx * invR;
             fpy += scale * dy * invR;
-
-            // Viscosity Laplacian
             const viscScale = mass * mu / rho_j * cVisc * (h - r);
             fvx += viscScale * (vx[j] - vxi);
             fvy += viscScale * (vy[j] - vyi);
@@ -262,11 +225,10 @@ export class SPHSolver {
         }
       }
 
-      // Gravity
       const fgx = gravX * rho_i;
       const fgy = gravY * rho_i;
 
-      // External force sources
+      // External forces (with vortex support)
       let fex = 0, fey = 0, heatDelta = 0;
       for (let s = 0; s < sources.length; s++) {
         const src = sources[s];
@@ -276,13 +238,18 @@ export class SPHSolver {
         if (sd < src.radius && sd > 1e-4) {
           const w = (src.radius - sd) / src.radius;
           const invD = 1 / sd;
+          // Radial force
           fex += src.strength * w * sdx * invD * rho_i;
           fey += src.strength * w * sdy * invD * rho_i;
+          // Vortex (perpendicular) force
+          if (src.vortex) {
+            fex += src.vortex * w * (-sdy * invD) * rho_i;
+            fey += src.vortex * w * (sdx * invD) * rho_i;
+          }
           heatDelta = Math.max(heatDelta, w * 0.12);
         }
       }
 
-      // Integration (semi-implicit Euler)
       const invRho = 1 / rho_i;
       const ax = (fpx + fvx + fgx + fex) * invRho;
       const ay = (fpy + fvy + fgy + fey) * invRho;
@@ -291,7 +258,6 @@ export class SPHSolver {
       let npx = xi + nvx * dt;
       let npy = yi + nvy * dt;
 
-      // Boundary
       const br = 2;
       if (npx < br) { npx = br; nvx = Math.abs(nvx) * damp; }
       if (npx > W - br) { npx = W - br; nvx = -Math.abs(nvx) * damp; }
@@ -303,14 +269,12 @@ export class SPHSolver {
       px[i] = npx;
       py[i] = npy;
 
-      // Temperature
       const speed = Math.sqrt(nvx * nvx + nvy * nvy);
       const target = Math.min(speed * 0.004 + heatDelta, 1.0);
       this.temp[i] = this.temp[i] * 0.94 + target * 0.06;
     }
   }
 
-  /** Advance simulation. */
   step(substeps = 3): void {
     for (let s = 0; s < substeps; s++) {
       this.buildGrid();
