@@ -104,11 +104,11 @@ const particleFragmentShader = /* glsl */ `
     float dist = length(gl_PointCoord - 0.5) * 2.0;
     if (dist > 1.0) discard;
     // Multi-layer glow in single shader
-    float core = smoothstep(0.45, 0.0, dist);
+    float core = smoothstep(0.35, 0.0, dist);
     float glow = smoothstep(1.0, 0.0, dist);
-    float intensity = core * 0.8 + glow * 0.2;
+    float intensity = core * 1.2 + glow * 0.4;
     vec3 color = texture2D(uLut, vec2(vTemp, 0.5)).rgb;
-    gl_FragColor = vec4(color * intensity, glow);
+    gl_FragColor = vec4(color * intensity, max(glow, core));
   }
 `;
 
@@ -177,7 +177,9 @@ export class WebGLRenderer {
 
     this.scene = new THREE.Scene();
     // Orthographic: particle px/py map directly to screen coords (Y flipped)
-    this.camera = new THREE.OrthographicCamera(0, w, 0, h, -10, 10);
+    // OrthographicCamera(left, right, top, bottom, near, far)
+    // top=h, bottom=0 so Y increases upward (GL convention)
+    this.camera = new THREE.OrthographicCamera(0, w, h, 0, -10, 10);
     this.camera.position.z = 1;
 
     // ── Background quad ──────────────────────────────────────────────────
@@ -188,8 +190,8 @@ export class WebGLRenderer {
     this.scene.add(this.bgMesh);
 
     // ── LUT texture ──────────────────────────────────────────────────────
-    const lutData = new Uint8Array(256 * 3);
-    this.lutTexture = new THREE.DataTexture(lutData, 256, 1, THREE.RGBFormat);
+    const lutData = new Uint8Array(256 * 4);
+    this.lutTexture = new THREE.DataTexture(lutData, 256, 1, THREE.RGBAFormat);
     this.lutTexture.minFilter = THREE.LinearFilter;
     this.lutTexture.magFilter = THREE.LinearFilter;
     this.lutTexture.needsUpdate = true;
@@ -294,9 +296,10 @@ export class WebGLRenderer {
     const data = this.lutTexture.image.data as Uint8Array;
     for (let i = 0; i < 256; i++) {
       const [r, g, b] = theme.rgb[i];
-      data[i * 3] = r;
-      data[i * 3 + 1] = g;
-      data[i * 3 + 2] = b;
+      data[i * 4] = r;
+      data[i * 4 + 1] = g;
+      data[i * 4 + 2] = b;
+      data[i * 4 + 3] = 255;
     }
     this.lutTexture.needsUpdate = true;
   }
@@ -333,6 +336,7 @@ export class WebGLRenderer {
     this.renderer.setSize(w, h, false);
     this.camera.right = w;
     this.camera.top = h;
+    this.camera.bottom = 0;
     this.camera.updateProjectionMatrix();
     this.composer.setSize(w, h);
     this.bloomPass.resolution.set(w, h);
@@ -379,61 +383,15 @@ export class WebGLRenderer {
     // Audio scale
     this.material.uniforms.uAudioScale.value = 1 + audioEnergy * 0.6;
 
-    // ── Trail pass (ping-pong) ───────────────────────────────────────────
-    const prevFBO = this.trailFBOs[this.trailIdx];
-    const nextFBO = this.trailFBOs[1 - this.trailIdx];
-
-    // Fade previous trail
-    this.trailMaterial.uniforms.tPrev.value = prevFBO.texture;
-    this.trailMaterial.uniforms.uFade.value = 1 - CFG.trailFade;
-    const [br, bg, bb] = theme.bgRGB;
-    this.trailMaterial.uniforms.uBgColor.value.setRGB(br / 255, bg / 255, bb / 255);
-
-    this.renderer.setRenderTarget(nextFBO);
-    this.renderer.clear();
-    this.renderer.render(this.trailScene, this.trailCamera);
-
-    // Draw particles on top of faded trail
-    this.bgMesh.visible = false;
-    this.cursorRing.visible = false;
-    this.cursorDot.visible = false;
-    if (this.outlineLine) this.outlineLine.visible = false;
-    this.renderer.render(this.scene, this.camera);
-    this.bgMesh.visible = true;
-
-    this.trailIdx = 1 - this.trailIdx;
-
-    // Use trail as background texture for main scene
-    this.bgMesh.visible = true;
-    // We'll composite the trail in the main pass
-
     // ── Formation outline ────────────────────────────────────────────────
     this.updateOutline(overlay, theme);
 
     // ── Cursor ───────────────────────────────────────────────────────────
     this.updateCursor(cursor);
 
-    // ── Main render via composer (bloom + vignette) ──────────────────────
-    this.renderer.setRenderTarget(null);
-    this.renderer.clear();
-
-    // Draw background
-    this.points.visible = false;
-    if (this.outlineLine) this.outlineLine.visible = false;
-    this.renderer.render(this.scene, this.camera);
-
-    // Draw trail FBO as fullscreen quad (additive)
-    this.trailMaterial.uniforms.tPrev.value = this.trailFBOs[this.trailIdx].texture;
-    this.trailMaterial.uniforms.uFade.value = 1.0; // no fade, just display
-    this.renderer.render(this.trailScene, this.trailCamera);
-
-    // Draw particles + outline on top
+    // ── Render via EffectComposer (bloom + vignette) ────────────────────
     this.points.visible = true;
-    if (this.outlineLine) this.outlineLine.visible = true;
-    this.cursorRing.visible = cursor.x >= 0;
-    this.cursorDot.visible = cursor.x >= 0;
-
-    // Use composer for bloom + vignette
+    this.bgMesh.visible = true;
     this.composer.render();
   }
 

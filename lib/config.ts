@@ -23,7 +23,7 @@ export const CFG = {
   handRadius: 90,
 
   // WebGL rendering
-  pointSize: 8.0,       // base gl_PointSize for particles
+  pointSize: 14.0,      // base gl_PointSize for particles
   trailFade: 0.06,      // trail persistence (lower = longer trails)
 
   // Post-processing (UnrealBloom)

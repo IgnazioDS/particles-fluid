@@ -223,10 +223,6 @@ export default function Page() {
         setPresentationMode((p) => !p);
       } else if (key === "a" && formation) {
         setAutoCycle(formation.toggleAutoCycle());
-      } else if (key === "w") {
-        toggleWebcam();
-      } else if (key === "t") {
-        toggleTracking();
       } else if (key in KEY_SHAPES && formation) {
         const { name, opts } = KEY_SHAPES[key];
         formation.forceShape(name, opts);
@@ -386,7 +382,8 @@ export default function Page() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", onResize);
     };
-  }, [particles, toggleWebcam, toggleTracking]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [particles]);
 
   const theme = THEMES[themeIdx];
 
