@@ -53,14 +53,14 @@ const VignetteShader = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trail fade shader (fullscreen quad that blends previous FBO with fade)
+// Trail fade shader (fullscreen quad that fades previous FBO toward black)
+// For additive compositing: dark = transparent, so fade toward 0
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TrailFadeShader = {
   uniforms: {
     tPrev: { value: null as THREE.Texture | null },
     uFade: { value: 0.94 },
-    uBgColor: { value: new THREE.Color(0x060410) },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -72,14 +72,28 @@ const TrailFadeShader = {
   fragmentShader: /* glsl */ `
     uniform sampler2D tPrev;
     uniform float uFade;
-    uniform vec3 uBgColor;
     varying vec2 vUv;
     void main() {
       vec4 prev = texture2D(tPrev, vUv);
-      gl_FragColor = vec4(mix(uBgColor, prev.rgb, uFade), 1.0);
+      gl_FragColor = vec4(prev.rgb * uFade, 1.0);
     }
   `,
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hand skeleton connections (MediaPipe 21-landmark model)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const HAND_CONNECTIONS: [number, number][] = [
+  [0, 1], [1, 2], [2, 3], [3, 4],          // thumb
+  [0, 5], [5, 6], [6, 7], [7, 8],           // index
+  [0, 9], [9, 10], [10, 11], [11, 12],      // middle
+  [0, 13], [13, 14], [14, 15], [15, 16],    // ring
+  [0, 17], [17, 18], [18, 19], [19, 20],    // pinky
+  [5, 9], [9, 13], [13, 17],                // palm knuckle row
+];
+// 23 connections × 2 pts × 2 hands = 92 max vertices
+const SKELETON_MAX_VERTS = 96;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Particle shaders
@@ -143,7 +157,14 @@ export class WebGLRenderer {
   private trailCamera: THREE.OrthographicCamera;
   private trailQuad: THREE.Mesh;
   private trailMaterial: THREE.ShaderMaterial;
-  private displayMaterial: THREE.MeshBasicMaterial;
+  private trailDisplayMesh: THREE.Mesh;    // shows trail FBO in main scene (additive)
+  private trailDisplayMat: THREE.MeshBasicMaterial;
+
+  // Hand skeleton
+  private skeletonGeo: THREE.BufferGeometry;
+  private skeletonMat: THREE.LineBasicMaterial;
+  private skeletonLines: THREE.LineSegments;
+  private skeletonPosAttr: THREE.BufferAttribute;
 
   // Post-processing
   private composer: EffectComposer;
@@ -248,12 +269,38 @@ export class WebGLRenderer {
     this.trailQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.trailMaterial);
     this.trailScene.add(this.trailQuad);
 
-    // Display material: shows trail FBO on screen with additive blending
-    this.displayMaterial = new THREE.MeshBasicMaterial({
+    // Trail display mesh: fullscreen plane that shows the trail FBO via additive blending.
+    // Additive blending means dark pixels add nothing, so webcam shows through.
+    this.trailDisplayMat = new THREE.MeshBasicMaterial({
+      map: null,
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
+    const trailDisplayGeo = new THREE.PlaneGeometry(w, h);
+    this.trailDisplayMesh = new THREE.Mesh(trailDisplayGeo, this.trailDisplayMat);
+    this.trailDisplayMesh.position.set(w / 2, h / 2, -4.9);
+    this.trailDisplayMesh.frustumCulled = false;
+    this.scene.add(this.trailDisplayMesh);
+
+    // ── Hand skeleton ────────────────────────────────────────────────────
+    const skeletonPosArray = new Float32Array(SKELETON_MAX_VERTS * 3);
+    this.skeletonPosAttr = new THREE.BufferAttribute(skeletonPosArray, 3);
+    this.skeletonPosAttr.setUsage(THREE.DynamicDrawUsage);
+    this.skeletonGeo = new THREE.BufferGeometry();
+    this.skeletonGeo.setAttribute("position", this.skeletonPosAttr);
+    this.skeletonGeo.setDrawRange(0, 0);
+    this.skeletonMat = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.4,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.skeletonLines = new THREE.LineSegments(this.skeletonGeo, this.skeletonMat);
+    this.skeletonLines.frustumCulled = false;
+    this.skeletonLines.visible = false;
+    this.scene.add(this.skeletonLines);
 
     // ── Post-processing ──────────────────────────────────────────────────
     this.composer = new EffectComposer(this.renderer);
@@ -352,14 +399,28 @@ export class WebGLRenderer {
     this.bloomPass.resolution.set(w, h);
     this.trailFBOs[0].setSize(w, h);
     this.trailFBOs[1].setSize(w, h);
+    // Clear FBOs after resize to avoid stretched trail artifacts
+    this.clearTrailFBOs();
     this.bgMesh.geometry.dispose();
     this.bgMesh.geometry = new THREE.PlaneGeometry(w, h);
     this.bgMesh.position.set(w / 2, h / 2, -5);
+    this.trailDisplayMesh.geometry.dispose();
+    this.trailDisplayMesh.geometry = new THREE.PlaneGeometry(w, h);
+    this.trailDisplayMesh.position.set(w / 2, h / 2, -4.9);
+  }
+
+  private clearTrailFBOs(): void {
+    for (const fbo of this.trailFBOs) {
+      this.renderer.setRenderTarget(fbo);
+      this.renderer.clear();
+    }
+    this.renderer.setRenderTarget(null);
   }
 
   reset(theme: Theme): void {
     this.uploadLut(theme);
     this.setBgColor(theme);
+    this.clearTrailFBOs();
   }
 
   // ── Main render ──────────────────────────────────────────────────────────
@@ -373,6 +434,7 @@ export class WebGLRenderer {
     overlay: FormationOverlay | null,
     cursor: { x: number; y: number; active: boolean; mode: string },
     audioEnergy: number,
+    hands?: Array<{ x: number; y: number; z: number }[]>,
   ): void {
     // Upload theme LUT
     this.uploadLut(theme);
@@ -399,14 +461,85 @@ export class WebGLRenderer {
     // ── Cursor ───────────────────────────────────────────────────────────
     this.updateCursor(cursor);
 
-    // ── Render via EffectComposer (bloom + vignette) ─────────────────────
-    this.bgMesh.visible = true;
+    // ── Hand skeleton ────────────────────────────────────────────────────
+    this.updateHandSkeleton(hands);
+
+    // ── Trail FBO pass ───────────────────────────────────────────────────
+    // Pass 1: fade previous trail → write FBO
+    const read = this.trailFBOs[this.trailIdx];
+    const write = this.trailFBOs[1 - this.trailIdx];
+    this.trailMaterial.uniforms.tPrev.value = read.texture;
+    this.trailMaterial.uniforms.uFade.value = 1 - CFG.trailFade;
+
+    this.renderer.setRenderTarget(write);
+    this.renderer.autoClear = true;
+    this.renderer.clear();
+    this.renderer.render(this.trailScene, this.trailCamera);
+
+    // Pass 2: render particles + outline into same write FBO (no clear)
+    this.renderer.autoClear = false;
+    this.bgMesh.visible = false;        // bg already handled by fade
+    this.trailDisplayMesh.visible = false;
+    this.skeletonLines.visible = false; // skeleton rendered to screen separately
     this.points.visible = true;
     this.cursorRing.visible = cursor.x >= 0;
     this.cursorDot.visible = cursor.x >= 0;
+    this.renderer.render(this.scene, this.camera);
+    this.renderer.autoClear = true;
+
+    this.trailIdx ^= 1;
+
+    // ── Composite pass: bgMesh + trailDisplayMesh → bloom + vignette ─────
+    this.trailDisplayMat.map = write.texture;
+    this.trailDisplayMat.needsUpdate = true;
+
+    this.bgMesh.visible = true;
+    this.trailDisplayMesh.visible = true;
+    this.points.visible = false;        // already in trail FBO
+    this.cursorRing.visible = false;    // already in trail FBO
+    this.cursorDot.visible = false;     // already in trail FBO
+
+    // Hand skeleton on top of bloom (crisp, not bloomed)
+    if (hands && hands.length > 0) {
+      this.skeletonLines.visible = true;
+    }
 
     this.renderer.setRenderTarget(null);
     this.composer.render();
+  }
+
+  // ── Hand skeleton ────────────────────────────────────────────────────────
+
+  private updateHandSkeleton(
+    hands?: Array<{ x: number; y: number; z: number }[]>,
+  ): void {
+    if (!hands || hands.length === 0) {
+      this.skeletonLines.visible = false;
+      this.skeletonGeo.setDrawRange(0, 0);
+      return;
+    }
+
+    const pos = this.skeletonPosAttr.array as Float32Array;
+    let vtxCount = 0;
+
+    for (const lm of hands) {
+      if (lm.length < 21) continue;
+      for (const [a, b] of HAND_CONNECTIONS) {
+        if (vtxCount + 2 > SKELETON_MAX_VERTS) break;
+        // Mirror X, flip Y to match GL coords
+        pos[vtxCount * 3]     = (1 - lm[a].x) * this.W;
+        pos[vtxCount * 3 + 1] = this.H - lm[a].y * this.H;
+        pos[vtxCount * 3 + 2] = 0.9;
+        vtxCount++;
+        pos[vtxCount * 3]     = (1 - lm[b].x) * this.W;
+        pos[vtxCount * 3 + 1] = this.H - lm[b].y * this.H;
+        pos[vtxCount * 3 + 2] = 0.9;
+        vtxCount++;
+      }
+    }
+
+    this.skeletonGeo.setDrawRange(0, vtxCount);
+    this.skeletonPosAttr.needsUpdate = true;
   }
 
   // ── Outline ──────────────────────────────────────────────────────────────
@@ -484,6 +617,9 @@ export class WebGLRenderer {
     this.trailFBOs[0].dispose();
     this.trailFBOs[1].dispose();
     this.trailMaterial.dispose();
+    this.trailDisplayMat.dispose();
+    this.skeletonGeo.dispose();
+    this.skeletonMat.dispose();
     this.outlineMat.dispose();
     this.renderer.dispose();
     this.videoTexture?.dispose();

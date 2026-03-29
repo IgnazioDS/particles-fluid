@@ -54,6 +54,8 @@ export default function Page() {
   const [trackingOn, setTrackingOn] = useState(false);
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [handsDetected, setHandsDetected] = useState(0);
+  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState<string | undefined>(undefined);
   const [activeShape, setActiveShape] = useState<string | null>(null);
   const [autoCycle, setAutoCycle] = useState(false);
   const [presentationMode, setPresentationMode] = useState(false);
@@ -110,13 +112,16 @@ export default function Page() {
       wm.stop();
       setWebcamOn(false);
     } else {
-      const video = await wm.start();
+      // Enumerate devices first so user can pick
+      const devices = await WebcamManager.listDevices();
+      setCameraDevices(devices);
+      const video = await wm.start(selectedDevice);
       if (video) {
         rendererRef.current?.setBackgroundVideo(video);
         setWebcamOn(true);
       }
     }
-  }, []);
+  }, [selectedDevice]);
 
   // Hand tracking toggle
   const toggleTracking = useCallback(async () => {
@@ -138,6 +143,17 @@ export default function Page() {
       setTrackingLoading(false);
     }
   }, []);
+
+  // W/T keyboard shortcuts for webcam and tracking
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (key === "w") toggleWebcam();
+      if (key === "t") toggleTracking();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleWebcam, toggleTracking]);
 
   // Screenshot
   const screenshot = useCallback(() => {
@@ -352,11 +368,13 @@ export default function Page() {
           setOverlayData(null);
         }
 
+        const handLandmarks = tr?.active ? tr.hands.map((h) => h.landmarks) : undefined;
         renderer.render(
           solver.px, solver.py, solver.temp, solver.n,
           theme, overlay,
           { x: m.x, y: m.y, active: m.left || m.right, mode: m.right ? "repel" : params.mode },
           audioEnergy,
+          handLandmarks,
         );
 
         // FPS
@@ -473,6 +491,34 @@ export default function Page() {
 
           {/* Camera section */}
           <div className="section-label">Camera</div>
+          {cameraDevices.length > 1 && (
+            <div className="slider-row" style={{ marginBottom: 4 }}>
+              <select
+                style={{
+                  width: "100%", background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)",
+                  color: "rgba(255,255,255,0.8)", borderRadius: 4, padding: "2px 4px", fontSize: 10,
+                }}
+                value={selectedDevice ?? ""}
+                onChange={(e) => {
+                  setSelectedDevice(e.target.value || undefined);
+                  if (webcamOn) {
+                    // Restart webcam with new device
+                    webcamRef.current?.stop();
+                    rendererRef.current?.clearBackgroundVideo();
+                    setWebcamOn(false);
+                    setTrackingOn(false);
+                    setHandsDetected(0);
+                  }
+                }}
+              >
+                {cameraDevices.map((d, i) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label || `Camera ${i + 1}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="action-row">
             <button className={`action-btn ${webcamOn ? "on" : ""}`} onClick={toggleWebcam}>
               {webcamOn ? "\uD83D\uDCF7 Cam ON" : "\uD83D\uDCF7 Webcam"}

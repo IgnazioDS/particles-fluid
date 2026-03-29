@@ -8,10 +8,26 @@ export class WebcamManager {
   active = false;
   private stream: MediaStream | null = null;
 
-  async start(): Promise<HTMLVideoElement | null> {
+  /** List available video input devices. */
+  static async listDevices(): Promise<MediaDeviceInfo[]> {
     try {
+      // Must request permission first so device labels are populated
+      const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      probe.getTracks().forEach((t) => t.stop());
+      const all = await navigator.mediaDevices.enumerateDevices();
+      return all.filter((d) => d.kind === "videoinput");
+    } catch {
+      return [];
+    }
+  }
+
+  async start(deviceId?: string): Promise<HTMLVideoElement | null> {
+    try {
+      const videoConstraints: MediaTrackConstraints = deviceId
+        ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+        : { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } };
       this.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        video: videoConstraints,
         audio: false,
       });
       const video = document.createElement("video");
