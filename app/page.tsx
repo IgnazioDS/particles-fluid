@@ -253,6 +253,11 @@ export default function Page() {
       formation = new FormationManager(W, H);
       formationRef.current = formation;
 
+      // Reset FPS timer after async init
+      fpsT0 = performance.now();
+      lastTime = performance.now();
+      frameCount = 0;
+
       // ── Animation loop ─────────────────────────────────────────────────
       function frame() {
         if (!running || !solver || !renderer || !formation) return;
