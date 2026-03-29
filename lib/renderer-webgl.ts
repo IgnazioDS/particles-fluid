@@ -142,6 +142,7 @@ export class WebGLRenderer {
   private trailCamera: THREE.OrthographicCamera;
   private trailQuad: THREE.Mesh;
   private trailMaterial: THREE.ShaderMaterial;
+  private displayMaterial: THREE.MeshBasicMaterial;
 
   // Post-processing
   private composer: EffectComposer;
@@ -245,6 +246,13 @@ export class WebGLRenderer {
     });
     this.trailQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.trailMaterial);
     this.trailScene.add(this.trailQuad);
+
+    // Display material: shows trail FBO on screen with additive blending
+    this.displayMaterial = new THREE.MeshBasicMaterial({
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
 
     // ── Post-processing ──────────────────────────────────────────────────
     this.composer = new EffectComposer(this.renderer);
@@ -389,10 +397,58 @@ export class WebGLRenderer {
     // ── Cursor ───────────────────────────────────────────────────────────
     this.updateCursor(cursor);
 
-    // ── Render via EffectComposer (bloom + vignette) ────────────────────
+    // ── Trail pass: fade prev frame + draw particles into FBO ────────────
+    const prevFBO = this.trailFBOs[this.trailIdx];
+    const nextFBO = this.trailFBOs[1 - this.trailIdx];
+
+    // Fade previous trail
+    this.trailMaterial.uniforms.tPrev.value = prevFBO.texture;
+    this.trailMaterial.uniforms.uFade.value = 1 - CFG.trailFade;
+    const [br, bg, bb] = theme.bgRGB;
+    this.trailMaterial.uniforms.uBgColor.value.setRGB(br / 255, bg / 255, bb / 255);
+
+    this.renderer.setRenderTarget(nextFBO);
+    this.renderer.clear();
+    this.renderer.render(this.trailScene, this.trailCamera);
+
+    // Draw particles on top of faded trail (additive via material blending)
+    this.bgMesh.visible = false;
+    this.cursorRing.visible = false;
+    this.cursorDot.visible = false;
+    if (this.outlineLine) this.outlineLine.visible = false;
     this.points.visible = true;
+    this.renderer.render(this.scene, this.camera);
+
+    this.trailIdx = 1 - this.trailIdx;
+
+    // ── Final compose to screen ──────────────────────────────────────────
+    this.renderer.setRenderTarget(null);
+    this.renderer.clear();
+
+    // Draw background (solid color or webcam)
     this.bgMesh.visible = true;
-    this.composer.render();
+    this.points.visible = false;
+    if (this.outlineLine) this.outlineLine.visible = false;
+    this.cursorRing.visible = false;
+    this.cursorDot.visible = false;
+    this.renderer.render(this.scene, this.camera);
+
+    // Overlay trail FBO (shows particles + trails with additive blend)
+    this.trailMaterial.uniforms.tPrev.value = nextFBO.texture;
+    this.trailMaterial.uniforms.uFade.value = 1.0;
+    this.displayMaterial.map = nextFBO.texture;
+    this.displayMaterial.needsUpdate = true;
+    this.trailQuad.material = this.displayMaterial;
+    this.renderer.render(this.trailScene, this.trailCamera);
+    this.trailQuad.material = this.trailMaterial;
+
+    // Draw outline + cursor on top
+    this.points.visible = false;
+    this.bgMesh.visible = false;
+    if (this.outlineLine) this.outlineLine.visible = true;
+    this.cursorRing.visible = cursor.x >= 0;
+    this.cursorDot.visible = cursor.x >= 0;
+    this.renderer.render(this.scene, this.camera);
   }
 
   // ── Outline ──────────────────────────────────────────────────────────────
