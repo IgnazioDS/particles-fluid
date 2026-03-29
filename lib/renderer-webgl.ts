@@ -170,6 +170,12 @@ export class WebGLRenderer {
   private composer: EffectComposer;
   private bloomPass: UnrealBloomPass;
 
+  // 3D wireframe box overlay (perspective camera, rendered after composer)
+  private boxScene: THREE.Scene;
+  private boxCamera: THREE.PerspectiveCamera;
+  private boxEdges: THREE.LineSegments;
+  private boxMat: THREE.LineBasicMaterial;
+
   // Formation outline
   private outlineLine: THREE.Line | null = null;
   private outlineMat: THREE.LineBasicMaterial;
@@ -345,6 +351,32 @@ export class WebGLRenderer {
     this.cursorDot = new THREE.Mesh(dotGeo, this.cursorDotMat);
     this.cursorDot.visible = false;
     this.scene.add(this.cursorDot);
+
+    // ── 3D Wireframe box (perspective overlay) ───────────────────────────
+    // Separate scene + perspective camera rendered ON TOP of the composer output.
+    // Gives depth without touching the 2D SPH physics.
+    this.boxScene = new THREE.Scene();
+    this.boxCamera = new THREE.PerspectiveCamera(38, w / h, 0.1, 100);
+    this.boxCamera.position.set(0, 0, 3.8);
+    this.boxCamera.lookAt(0, 0, 0);
+
+    // Non-cubic box: match viewport aspect so it appears to frame the particles
+    const bw = 1.9;
+    const bh = 1.9 * (h / w);
+    const bd = 1.6;
+    const boxGeo = new THREE.BoxGeometry(bw, bh, bd);
+    const edgesGeo = new THREE.EdgesGeometry(boxGeo);
+    this.boxMat = new THREE.LineBasicMaterial({
+      color: 0xff6622,
+      transparent: true,
+      opacity: 0.55,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.boxEdges = new THREE.LineSegments(edgesGeo, this.boxMat);
+    // Initial tilt so the box shows 3D depth immediately
+    this.boxEdges.rotation.set(0.25, 0.4, 0.08);
+    this.boxScene.add(this.boxEdges);
   }
 
   // ── Theme LUT upload ─────────────────────────────────────────────────────
@@ -407,6 +439,12 @@ export class WebGLRenderer {
     this.trailDisplayMesh.geometry.dispose();
     this.trailDisplayMesh.geometry = new THREE.PlaneGeometry(w, h);
     this.trailDisplayMesh.position.set(w / 2, h / 2, -4.9);
+    // Update box camera aspect + rebuild geometry
+    this.boxCamera.aspect = w / h;
+    this.boxCamera.updateProjectionMatrix();
+    this.boxEdges.geometry.dispose();
+    const bw2 = 1.9, bh2 = 1.9 * (h / w), bd2 = 1.6;
+    this.boxEdges.geometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(bw2, bh2, bd2));
   }
 
   private clearTrailFBOs(): void {
@@ -506,6 +544,16 @@ export class WebGLRenderer {
 
     this.renderer.setRenderTarget(null);
     this.composer.render();
+
+    // ── 3D box overlay (perspective, on top of bloom) ────────────────────
+    const t = performance.now() * 0.001;
+    this.boxEdges.rotation.y = 0.4 + t * 0.12;           // continuous Y spin
+    this.boxEdges.rotation.x = 0.25 + Math.sin(t * 0.3) * 0.08; // gentle X sway
+    this.boxEdges.rotation.z = 0.08 + Math.sin(t * 0.17) * 0.04;
+    this.boxMat.color.set(theme.accent);
+    this.renderer.autoClear = false;
+    this.renderer.render(this.boxScene, this.boxCamera);
+    this.renderer.autoClear = true;
   }
 
   // ── Hand skeleton ────────────────────────────────────────────────────────
@@ -621,6 +669,8 @@ export class WebGLRenderer {
     this.skeletonGeo.dispose();
     this.skeletonMat.dispose();
     this.outlineMat.dispose();
+    this.boxEdges.geometry.dispose();
+    this.boxMat.dispose();
     this.renderer.dispose();
     this.videoTexture?.dispose();
   }
